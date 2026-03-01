@@ -1,0 +1,246 @@
+# ============================================================
+# homeassistant/wordclock_package.yaml
+#
+# Drop this file into your HA config packages directory and add:
+#   packages:
+#     wordclock: !include packages/wordclock_package.yaml
+#
+# Exposes Word Clock controls as proper HA entities:
+#   • Overall brightness  (number)
+#   • Word brightness     (number)
+#   • Background brightness (number)
+#   • Word colour         (input_text → REST call)
+#   • Background colour   (input_text → REST call)
+#   • Random word colour  (switch)
+#   • Random bg colour    (switch)
+#   • Show AM/PM          (switch)
+#   • Transition mode     (select)
+#   • Transition duration (number)
+#
+# Replace WORDCLOCK_IP with your WLED device's IP address.
+# ============================================================
+
+# ── REST command helpers ──────────────────────────────────────────────────────
+rest_command:
+  wordclock_state:
+    url: "http://WORDCLOCK_IP/json/state"
+    method: POST
+    headers:
+      Content-Type: application/json
+    payload: "{{ payload }}"
+
+  wordclock_set_wc:
+    url: "http://WORDCLOCK_IP/json/state"
+    method: POST
+    headers:
+      Content-Type: application/json
+    payload: >-
+      {"wc": {{ params | tojson }}}
+
+# ── Input helpers (UI controls) ───────────────────────────────────────────────
+input_number:
+  wordclock_word_brightness:
+    name: "Word Clock – Word Brightness"
+    min: 0
+    max: 255
+    step: 1
+    initial: 255
+    icon: mdi:brightness-7
+
+  wordclock_bg_brightness:
+    name: "Word Clock – Background Brightness"
+    min: 0
+    max: 255
+    step: 1
+    initial: 20
+    icon: mdi:brightness-3
+
+  wordclock_transition_ms:
+    name: "Word Clock – Transition Duration (ms)"
+    min: 200
+    max: 5000
+    step: 100
+    initial: 1200
+    icon: mdi:timer-outline
+
+input_text:
+  wordclock_word_color:
+    name: "Word Clock – Word Colour (hex)"
+    initial: "#FFC864"
+    pattern: "^#[0-9A-Fa-f]{6}$"
+    icon: mdi:palette
+
+  wordclock_bg_color:
+    name: "Word Clock – Background Colour (hex)"
+    initial: "#00001E"
+    pattern: "^#[0-9A-Fa-f]{6}$"
+    icon: mdi:palette-outline
+
+input_boolean:
+  wordclock_random_word_color:
+    name: "Word Clock – Random Word Colour"
+    initial: false
+    icon: mdi:shuffle-variant
+
+  wordclock_random_bg_color:
+    name: "Word Clock – Random Background Colour"
+    initial: false
+    icon: mdi:shuffle
+
+  wordclock_show_ampm:
+    name: "Word Clock – Show AM/PM"
+    initial: true
+    icon: mdi:clock-time-eight-outline
+
+input_select:
+  wordclock_transition_mode:
+    name: "Word Clock – Transition Mode"
+    options:
+      - "0 – Rainbow Wave"
+      - "1 – Radial Bloom"
+      - "2 – Corner Wipe"
+      - "3 – Random"
+    initial: "3 – Random"
+    icon: mdi:transition
+
+# ── Automations – push input helper changes to WLED ──────────────────────────
+automation:
+  - id: wordclock_sync_word_brightness
+    alias: "Word Clock: sync word brightness"
+    trigger:
+      - platform: state
+        entity_id: input_number.wordclock_word_brightness
+    action:
+      - service: rest_command.wordclock_set_wc
+        data:
+          params:
+            wordBri: "{{ states('input_number.wordclock_word_brightness') | int }}"
+
+  - id: wordclock_sync_bg_brightness
+    alias: "Word Clock: sync background brightness"
+    trigger:
+      - platform: state
+        entity_id: input_number.wordclock_bg_brightness
+    action:
+      - service: rest_command.wordclock_set_wc
+        data:
+          params:
+            bgBri: "{{ states('input_number.wordclock_bg_brightness') | int }}"
+
+  - id: wordclock_sync_word_color
+    alias: "Word Clock: sync word colour"
+    trigger:
+      - platform: state
+        entity_id: input_text.wordclock_word_color
+    action:
+      - service: rest_command.wordclock_set_wc
+        data:
+          params:
+            wordColor: "{{ states('input_text.wordclock_word_color') }}"
+
+  - id: wordclock_sync_bg_color
+    alias: "Word Clock: sync background colour"
+    trigger:
+      - platform: state
+        entity_id: input_text.wordclock_bg_color
+    action:
+      - service: rest_command.wordclock_set_wc
+        data:
+          params:
+            bgColor: "{{ states('input_text.wordclock_bg_color') }}"
+
+  - id: wordclock_sync_random_word
+    alias: "Word Clock: sync random word colour toggle"
+    trigger:
+      - platform: state
+        entity_id: input_boolean.wordclock_random_word_color
+    action:
+      - service: rest_command.wordclock_set_wc
+        data:
+          params:
+            randWord: "{{ states('input_boolean.wordclock_random_word_color') == 'on' }}"
+
+  - id: wordclock_sync_random_bg
+    alias: "Word Clock: sync random background colour toggle"
+    trigger:
+      - platform: state
+        entity_id: input_boolean.wordclock_random_bg_color
+    action:
+      - service: rest_command.wordclock_set_wc
+        data:
+          params:
+            randBg: "{{ states('input_boolean.wordclock_random_bg_color') == 'on' }}"
+
+  - id: wordclock_sync_ampm
+    alias: "Word Clock: sync AM/PM toggle"
+    trigger:
+      - platform: state
+        entity_id: input_boolean.wordclock_show_ampm
+    action:
+      - service: rest_command.wordclock_set_wc
+        data:
+          params:
+            ampm: "{{ states('input_boolean.wordclock_show_ampm') == 'on' }}"
+
+  - id: wordclock_sync_transition_mode
+    alias: "Word Clock: sync transition mode"
+    trigger:
+      - platform: state
+        entity_id: input_select.wordclock_transition_mode
+    action:
+      - service: rest_command.wordclock_set_wc
+        data:
+          params:
+            tranMode: >-
+              {{ states('input_select.wordclock_transition_mode') | regex_findall('^\d+') | first | int }}
+
+  - id: wordclock_sync_transition_ms
+    alias: "Word Clock: sync transition duration"
+    trigger:
+      - platform: state
+        entity_id: input_number.wordclock_transition_ms
+    action:
+      - service: rest_command.wordclock_set_wc
+        data:
+          params:
+            tranMs: "{{ states('input_number.wordclock_transition_ms') | int }}"
+
+# ── Sensor – polls WLED state every 60 s ─────────────────────────────────────
+sensor:
+  - platform: rest
+    name: "Word Clock State"
+    resource: "http://WORDCLOCK_IP/json/state"
+    value_template: "{{ value_json.wc.on | default('unknown') }}"
+    json_attributes_path: "$.wc"
+    json_attributes:
+      - wordBri
+      - bgBri
+      - ampm
+      - randWord
+      - randBg
+      - tranMode
+      - tranMs
+      - wordColor
+      - bgColor
+    scan_interval: 60
+
+# ── Dashboard card snippet ────────────────────────────────────────────────────
+# Add this to a Lovelace dashboard YAML card:
+#
+# type: vertical-stack
+# title: Word Clock
+# cards:
+#   - type: light
+#     entity: light.wordclock        # WLED auto-discovered light
+#   - type: entities
+#     title: Word Clock Settings
+#     entities:
+#       - input_number.wordclock_word_brightness
+#       - input_number.wordclock_bg_brightness
+#       - input_text.wordclock_word_color
+#       - input_text.wordclock_bg_color
+#       - input_boolean.wordclock_random_word_color
+#       - input_boolean.wordclock_random_bg_color
+#       - input_boolean.wordclock_show_ampm
+#       - input_select.wordclock_transition_mode
+#       - input_number.wordclock_transition_ms
