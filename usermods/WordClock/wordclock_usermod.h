@@ -103,10 +103,10 @@ private:
 
   // ── Runtime state ─────────────────────────────────────────────────────────
   uint8_t  lastMinute        = 255;
+  bool     firstRun          = true;   // true until we've shown the time once
   bool     transitionActive  = false;
   uint32_t transitionStart   = 0;
-  uint8_t  activeTransMode   = 0;   // resolved (no RANDOM) during each transition
-  bool     initDone          = false;
+  uint8_t  activeTransMode   = 0;
 
   // Buffered LED state for current time (set once per minute)
   uint32_t targetColors[TOTAL_LEDS]; // WRGB packed colors for target display
@@ -389,12 +389,20 @@ private:
   }
 
   // ── Time acquisition ──────────────────────────────────────────────────────
-  /** Return local time struct; returns false if time not synchronised. */
-  bool getLocalTime(struct tm& t) {
+  /**
+   * Populate t with the current local time.
+   * Returns false if NTP has not yet synchronised.
+   * Named wcGetLocalTime to avoid clashing with the ESP32 SDK's
+   * built-in getLocalTime() function.
+   */
+  bool wcGetLocalTime(struct tm& t) {
     if (!WLED_CONNECTED) return false;
-    updateLocalTime();          // WLED built-in: refreshes toki / localTime
-    t = *localtime_r(&localTime, &t);
-    return (localTime > 0);
+    updateLocalTime();                   // WLED built-in: refreshes localTime
+    if (localTime == 0) return false;    // not yet synced
+    struct tm tmp;
+    localtime_r(&localTime, &tmp);
+    t = tmp;
+    return true;
   }
 
   // ── Trigger a new transition ──────────────────────────────────────────────
@@ -409,10 +417,7 @@ private:
 public:
   // ── Usermod lifecycle ─────────────────────────────────────────────────────
   void setup() override {
-    initDone = true;
-    // Initialise resolved colours
     resolveColors();
-    // Pre-fill target with background
     clearTarget();
   }
 
@@ -420,30 +425,31 @@ public:
     if (!enabled || strip.isUpdating()) return;
 
     struct tm t;
-    if (!getLocalTime(t)) return;
+    if (!wcGetLocalTime(t)) return;    // wait for NTP sync
 
     int currentMinute = t.tm_min;
     int currentHour   = t.tm_hour;
 
-    // Detect minute rollover → start transition + rebuild display
-    if (currentMinute != lastMinute) {
-      lastMinute = currentMinute;
-      resolveColors();               // re-randomise colours each minute if set
-      buildTimeDisplay(currentHour, currentMinute);
-      triggerTransition();
-    }
-
-    // First run: no transition, just show current time
-    if (!initDone || lastMinute == 255) {
+    // ── First run after NTP sync: show current time immediately, no transition
+    if (firstRun) {
+      firstRun  = false;
       lastMinute = currentMinute;
       resolveColors();
       buildTimeDisplay(currentHour, currentMinute);
       applyTargetColors();
-      initDone = true;
+      strip.trigger();
       return;
     }
 
-    // Animate transition or hold target
+    // ── Minute rollover: rebuild display and start transition
+    if (currentMinute != lastMinute) {
+      lastMinute = currentMinute;
+      resolveColors();               // re-randomise colours if random mode is on
+      buildTimeDisplay(currentHour, currentMinute);
+      triggerTransition();
+    }
+
+    // ── Animate transition or hold steady
     if (transitionActive) {
       uint32_t elapsed = millis() - transitionStart;
       if (elapsed >= transitionMs) {
@@ -457,7 +463,10 @@ public:
       applyTargetColors();
     }
 
-    strip.show();
+    // Request WLED to push the updated pixel buffer to the LEDs.
+    // strip.trigger() is the correct usermod API — it sets a flag
+    // for WLED's main loop to call show() at the right time.
+    strip.trigger();
   }
 
   // ── JSON state (read/write from HA or WLED app) ───────────────────────────

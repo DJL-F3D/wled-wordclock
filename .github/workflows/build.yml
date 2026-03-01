@@ -2,10 +2,13 @@
 # .github/workflows/build.yml
 # Builds WLED Word Clock firmware for ESP32-C3 and ESP8266.
 #
-# Triggers:
-#   • Every push / PR to main
-#   • Manual dispatch (workflow_dispatch)
-#   • Git tags matching v* → creates a GitHub Release with .bin files attached
+# How it works:
+#   1. Clones the official WLED source at a pinned stable tag
+#   2. Injects our usermod files into the WLED source tree
+#   3. Applies platformio_override.ini to extend WLED's build envs
+#   4. Builds using WLED's own PlatformIO configuration
+#
+# To target a different WLED release, change WLED_TAG below.
 # ============================================================
 name: Build Firmware
 
@@ -20,17 +23,17 @@ on:
       release:
         description: "Create a GitHub release?"
         required: false
-        default:  "false"
+        default: "false"
         type: choice
         options: ["true", "false"]
 
 permissions:
-  contents: write   # needed to create releases and upload assets
+  contents: write
+
+env:
+  WLED_TAG: "0.14.4"   # change to target a different WLED release
 
 jobs:
-  # ──────────────────────────────────────────────────────────────────────────
-  # Build job – matrix over the two target environments
-  # ──────────────────────────────────────────────────────────────────────────
   build:
     name: Build – ${{ matrix.env }}
     runs-on: ubuntu-latest
@@ -39,21 +42,49 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - env: esp32c3
-            platform: espressif32
+          - env: wordclock_esp32c3
             artifact: wordclock-esp32c3
-          - env: esp8266
-            platform: espressif8266
+          - env: wordclock_esp8266
             artifact: wordclock-esp8266
 
     steps:
-      # ── 1. Checkout ────────────────────────────────────────────────────────
-      - name: Checkout repository
+      - name: Checkout Word Clock repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0      # full history for git describe / SHA stamping
+          fetch-depth: 0
 
-      # ── 2. Python + PlatformIO ─────────────────────────────────────────────
+      - name: Clone WLED ${{ env.WLED_TAG }}
+        run: |
+          git clone --depth 1 --branch ${{ env.WLED_TAG }} \
+            https://github.com/Aircoookie/WLED.git wled-src
+          echo "WLED cloned at tag ${{ env.WLED_TAG }}"
+
+      - name: Inject Word Clock files into WLED source tree
+        run: |
+          # Usermod source
+          cp -r usermods/WordClock wled-src/usermods/
+
+          # Register the usermod with WLED
+          cp wled00/usermods_list.cpp wled-src/wled00/usermods_list.cpp
+
+          # Add our usermod ID to WLED's const.h
+          {
+            echo ''
+            echo '// === Word Clock Usermod ==='
+            echo '#ifndef USERMOD_ID_WORDCLOCK'
+            echo '#define USERMOD_ID_WORDCLOCK 99'
+            echo '#endif'
+          } >> wled-src/wled00/const.h
+
+          echo "Injected files — usermod:"
+          ls wled-src/usermods/WordClock/
+          echo "Last lines of const.h:"
+          tail -6 wled-src/wled00/const.h
+
+      - name: Install platformio_override.ini
+        run: |
+          cp platformio_override.ini wled-src/platformio_override.ini
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -62,41 +93,41 @@ jobs:
       - name: Install PlatformIO
         run: pip install --upgrade platformio
 
-      # ── 3. Cache PlatformIO packages ───────────────────────────────────────
       - name: Cache PlatformIO packages
         uses: actions/cache@v4
         with:
           path: |
             ~/.platformio/packages
             ~/.platformio/platforms
-          key: pio-${{ matrix.platform }}-${{ hashFiles('platformio.ini') }}
+          key: pio-wled-${{ env.WLED_TAG }}-${{ matrix.env }}-${{ hashFiles('wled-src/platformio.ini') }}
           restore-keys: |
-            pio-${{ matrix.platform }}-
+            pio-wled-${{ env.WLED_TAG }}-${{ matrix.env }}-
+            pio-wled-${{ env.WLED_TAG }}-
 
-      # ── 4. Build ───────────────────────────────────────────────────────────
       - name: Build ${{ matrix.env }}
+        working-directory: wled-src
         run: pio run --environment ${{ matrix.env }}
 
-      # ── 5. Locate the .bin file ────────────────────────────────────────────
       - name: Find firmware binary
         id: find_bin
+        working-directory: wled-src
         run: |
           BIN=$(find .pio/build/${{ matrix.env }} -maxdepth 1 -name "*.bin" | head -1)
+          if [ -z "$BIN" ]; then
+            echo "ERROR: No .bin found in .pio/build/${{ matrix.env }}"
+            ls .pio/build/${{ matrix.env }}/ || true
+            exit 1
+          fi
           echo "bin_path=$BIN" >> "$GITHUB_OUTPUT"
-          echo "bin_name=$(basename $BIN)" >> "$GITHUB_OUTPUT"
           echo "Found: $BIN"
 
-      # ── 6. Upload artifact for use in the release job ──────────────────────
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: ${{ steps.find_bin.outputs.bin_path }}
+          path: wled-src/${{ steps.find_bin.outputs.bin_path }}
           retention-days: 30
 
-  # ──────────────────────────────────────────────────────────────────────────
-  # Release job – runs only on version tags or manual trigger with release=true
-  # ──────────────────────────────────────────────────────────────────────────
   release:
     name: Create GitHub Release
     needs: build
@@ -106,7 +137,6 @@ jobs:
       (github.event_name == 'workflow_dispatch' && github.event.inputs.release == 'true')
 
     steps:
-      # ── Download both firmware binaries ────────────────────────────────────
       - name: Download ESP32-C3 firmware
         uses: actions/download-artifact@v4
         with:
@@ -119,7 +149,6 @@ jobs:
           name: wordclock-esp8266
           path: release/
 
-      # ── Derive the tag name ────────────────────────────────────────────────
       - name: Get tag / version
         id: version
         run: |
@@ -129,7 +158,6 @@ jobs:
             echo "tag=dev-$(date +%Y%m%d-%H%M%S)" >> "$GITHUB_OUTPUT"
           fi
 
-      # ── Create the release and attach binaries ─────────────────────────────
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -139,50 +167,21 @@ jobs:
           prerelease: ${{ !startsWith(github.ref, 'refs/tags/v') }}
           body: |
             ## WLED Word Clock Firmware
+            Built on WLED base ${{ env.WLED_TAG }}
 
-            ### Installation
-            Flash the appropriate `.bin` file for your hardware using one of:
-            - [WLED Web Installer](https://install.wled.me) (paste your .bin URL)
-            - [ESP Flash Tool](https://www.espressif.com/en/support/download/other-tools)
-            - `esptool.py write_flash 0x0 wordclock-*.bin`
+            ### Flash via WLED Web Installer (easiest)
+            1. Go to https://install.wled.me
+            2. Connect your board via USB
+            3. Choose **Upload your own firmware** and select the `.bin` for your board
 
-            | File | Target hardware |
-            |------|----------------|
-            | `wordclock-esp32c3-*.bin` | ESP32-C3 (e.g. ESP32-C3 SuperMini, XIAO ESP32-C3) |
+            | File | Target board |
+            |------|-------------|
+            | `wordclock-esp32c3-*.bin` | ESP32-C3 (SuperMini, XIAO) |
             | `wordclock-esp8266-*.bin` | ESP8266 (Wemos D1 Mini, NodeMCU v2) |
 
-            ### First-time setup
-            1. Power on the board – it will create a hotspot named **WLED-AP**
-            2. Connect and navigate to `4.3.2.1` to enter your WiFi credentials
-            3. Once connected, open `http://wordclock.local` in your browser
-            4. Enable NTP in *Config → Time & Macros* and set your timezone
-            5. Configure the Word Clock settings under *Config → Usermods → wc*
-
-            ### Home Assistant
-            WLED is auto-discovered by HA's native WLED integration.
-            Import `homeassistant/wordclock_package.yaml` for full entity support.
-
-            See README.md for full documentation.
-          files: |
-            release/*.bin
-
-  # ──────────────────────────────────────────────────────────────────────────
-  # Linting / static analysis (optional but helpful)
-  # ──────────────────────────────────────────────────────────────────────────
-  lint:
-    name: Lint C++ headers
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install cppcheck
-        run: sudo apt-get install -y cppcheck
-      - name: Run cppcheck
-        run: >
-          cppcheck
-          --enable=warning,style
-          --suppress=missingInclude
-          --suppress=missingIncludeSystem
-          --suppress=preprocessorErrorDirective
-          -I usermods/WordClock
-          usermods/WordClock/wordclock_usermod.h
-          || true   # non-fatal – WLED headers are not available in CI
+            ### After flashing
+            1. Connect to the **WLED-AP** hotspot and enter your WiFi password
+            2. Open `http://wled.local` → **Config → LED Preferences** → LED count = **114**
+            3. **Config → Time & Macros** → enable NTP, set your UTC offset
+            4. **Config → Usermods → wc** → configure word clock options
+          files: release/*.bin
