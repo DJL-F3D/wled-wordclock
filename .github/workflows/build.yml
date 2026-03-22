@@ -2,12 +2,6 @@
 # .github/workflows/build.yml
 # Builds WLED Word Clock firmware for all four environments.
 #
-# How it works:
-#   1. Clones WLED from github.com/wled/WLED at a pinned tag
-#   2. Injects our usermod files into the WLED source tree
-#   3. Applies platformio_override.ini to add our build envs
-#   4. Compiles using WLED's own PlatformIO setup
-#
 # WLED_TAG must include the "v" prefix — e.g. "v0.15.3"
 # The repo moved from Aircoookie/WLED to wled/WLED in 2024.
 # ============================================================
@@ -34,8 +28,6 @@ permissions:
 env:
   WLED_REPO: "wled/WLED"
   WLED_TAG:  "v0.15.3"
-  # Opt in to Node.js 24 for all actions to silence the Node.js 20
-  # deprecation warnings from actions/checkout, cache, setup-python.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -70,24 +62,22 @@ jobs:
             wled-src
           echo "Cloned ${{ env.WLED_REPO }} at ${{ env.WLED_TAG }}"
 
-      # ── Inject our files into the WLED source tree ────────────────────────
-      # NOTE: We do NOT touch wled-src/wled00/const.h.
-      # The USERMOD_ID_* values are set exclusively via -D flags in
-      # platformio_override.ini, one per environment.  Injecting both IDs
-      # into const.h caused every build to compile both usermods, producing
-      # duplicate struct definitions and a compile error.
+      # ── Inject files ───────────────────────────────────────────────────────
+      # IMPORTANT: We do NOT modify const.h.
+      # Each environment defines exactly one USERMOD_ID_* via -D in
+      # platformio_override.ini.  The #ifdef guards in usermods_list.cpp
+      # ensure only that one usermod is compiled, preventing duplicate symbols.
       - name: Inject Word Clock files into WLED source
         run: |
-          cp -r usermods/WordClock     wled-src/usermods/
-          cp -r usermods/WordClock8x8  wled-src/usermods/
-          cp    wled00/usermods_list.cpp  wled-src/wled00/usermods_list.cpp
-          echo "Injected usermod files:"
+          cp -r usermods/WordClock         wled-src/usermods/
+          cp -r usermods/WordClock8x8      wled-src/usermods/
+          cp    wled00/usermods_list.cpp   wled-src/wled00/usermods_list.cpp
+          cp    platformio_override.ini    wled-src/platformio_override.ini
+          echo "=== Injected files ==="
           ls wled-src/usermods/WordClock/
           ls wled-src/usermods/WordClock8x8/
-
-      - name: Copy platformio_override.ini into WLED root
-        run: |
-          cp platformio_override.ini wled-src/platformio_override.ini
+          echo "=== usermods_list.cpp preview ==="
+          head -10 wled-src/wled00/usermods_list.cpp
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -111,6 +101,18 @@ jobs:
       - name: Build ${{ matrix.env }}
         working-directory: wled-src
         run: pio run --environment "${{ matrix.env }}"
+
+      # ── On failure: print the last 100 lines of the build log ─────────────
+      # This makes compiler errors visible directly in the Actions summary
+      # without needing to scroll through the full PlatformIO output.
+      - name: Show build errors (on failure)
+        if: failure()
+        working-directory: wled-src
+        run: |
+          echo "=== COMPILER ERRORS ==="
+          find .pio/build/${{ matrix.env }} -name "*.log" -exec tail -100 {} \; 2>/dev/null || true
+          echo "=== PlatformIO build output tail ==="
+          pio run --environment "${{ matrix.env }}" 2>&1 | grep -E "error:|warning:|In file" | head -60 || true
 
       - name: Find compiled .bin
         id: find_bin
