@@ -34,6 +34,9 @@ permissions:
 env:
   WLED_REPO: "wled/WLED"
   WLED_TAG:  "v0.15.3"
+  # Opt in to Node.js 24 for all actions to silence the Node.js 20
+  # deprecation warnings from actions/checkout, cache, setup-python.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
   build:
@@ -67,20 +70,24 @@ jobs:
             wled-src
           echo "Cloned ${{ env.WLED_REPO }} at ${{ env.WLED_TAG }}"
 
+      # ── Inject our files into the WLED source tree ────────────────────────
+      # NOTE: We do NOT touch wled-src/wled00/const.h.
+      # The USERMOD_ID_* values are set exclusively via -D flags in
+      # platformio_override.ini, one per environment.  Injecting both IDs
+      # into const.h caused every build to compile both usermods, producing
+      # duplicate struct definitions and a compile error.
       - name: Inject Word Clock files into WLED source
         run: |
           cp -r usermods/WordClock     wled-src/usermods/
           cp -r usermods/WordClock8x8  wled-src/usermods/
-          cp wled00/usermods_list.cpp  wled-src/wled00/usermods_list.cpp
-          printf '\n// Word Clock usermods\n'                         >> wled-src/wled00/const.h
-          printf '#ifndef USERMOD_ID_WORDCLOCK\n'                     >> wled-src/wled00/const.h
-          printf '#define USERMOD_ID_WORDCLOCK 99\n#endif\n'          >> wled-src/wled00/const.h
-          printf '#ifndef USERMOD_ID_WORDCLOCK_8X8\n'                 >> wled-src/wled00/const.h
-          printf '#define USERMOD_ID_WORDCLOCK_8X8 98\n#endif\n'      >> wled-src/wled00/const.h
-          echo "Injected. Tail of const.h:"; tail -7 wled-src/wled00/const.h
+          cp    wled00/usermods_list.cpp  wled-src/wled00/usermods_list.cpp
+          echo "Injected usermod files:"
+          ls wled-src/usermods/WordClock/
+          ls wled-src/usermods/WordClock8x8/
 
       - name: Copy platformio_override.ini into WLED root
-        run: cp platformio_override.ini wled-src/platformio_override.ini
+        run: |
+          cp platformio_override.ini wled-src/platformio_override.ini
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -111,7 +118,9 @@ jobs:
         run: |
           BIN=$(find .pio/build/${{ matrix.env }} -maxdepth 1 -name "*.bin" | head -1)
           if [ -z "$BIN" ]; then
-            echo "ERROR: no .bin found"; ls .pio/build/${{ matrix.env }}/ || true; exit 1
+            echo "ERROR: no .bin found in .pio/build/${{ matrix.env }}"
+            ls .pio/build/${{ matrix.env }}/ || true
+            exit 1
           fi
           echo "bin_path=$BIN" >> "$GITHUB_OUTPUT"
           echo "Found: $BIN"
